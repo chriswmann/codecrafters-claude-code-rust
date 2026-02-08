@@ -3,6 +3,8 @@ use clap::Parser;
 use serde_json::{Value, json};
 use std::{env, process};
 
+use codecrafters_claude_code::{AppError, ToolCall, read_file_to_string};
+
 #[derive(Parser)]
 #[command(author, version, about)]
 struct Args {
@@ -65,8 +67,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Logs from your program will appear here!");
 
     if let Some(content) = response["choices"][0]["message"]["content"].as_str() {
-        println!("{content}");
+        // Only print if the content is not empt A
+        if !content.trim().is_empty() {
+            println!("{content}");
+        }
     }
 
+    if let Some(tool_calls_array) = response["choices"][0]["message"]["tool_calls"].as_array() {
+        for tool_call in tool_calls_array {
+            let tool_call: ToolCall = serde_json::from_value(tool_call.clone())?;
+            let function_arguments = tool_call.function.arguments;
+            let args: Value = serde_json::from_str(&function_arguments)?;
+            let file_path = args["file_path"]
+                .as_str()
+                .ok_or(AppError::ArgumentError("Missing 'file_path'".to_string()))?;
+            let file_contents = read_file_to_string(file_path)?;
+            println!("{file_contents}");
+        }
+    }
     Ok(())
 }
