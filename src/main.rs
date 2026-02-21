@@ -2,11 +2,13 @@ use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
     ChatCompletionRequestToolMessage, ChatCompletionRequestUserMessage, ChatCompletionTool,
-    CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FunctionObjectArgs,
+    ChatCompletionTools, CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
+    FunctionObjectArgs,
 };
 use async_openai::{Client, config::OpenAIConfig};
 use clap::Parser;
 use serde_json::{Value, json};
+use std::io::Write;
 use std::path::Path;
 use std::{env, process};
 
@@ -37,26 +39,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = "anthropic/claude-haiku-4.5";
     let user_prompt = args.prompt;
 
+    let read_tool = ChatCompletionTool {
+        function: FunctionObjectArgs::default()
+            .name("Read")
+            .description("Read and return the contents of a file")
+            .parameters(json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "The path to the file to read",
+                    }
+                }
+            }))
+            .strict(true)
+            .build()?,
+    };
+
+    let write_tool = ChatCompletionTool {
+        function: FunctionObjectArgs::default()
+            .name("Write")
+            .description("Write contents to a file")
+            .parameters(json!({
+                      "type": "object",
+            "required": ["file_path", "content"],
+            "properties": {
+              "file_path": {
+                "type": "string",
+                "description": "The path of the file to write to"
+              },
+              "content": {
+                "type": "string",
+                "description": "The content to write to the file"
+              }
+            }
+                  }))
+            .strict(true)
+            .build()?,
+    };
+    let tools = vec![
+        ChatCompletionTools::Function(read_tool),
+        ChatCompletionTools::Function(write_tool),
+    ];
     let mut request = CreateChatCompletionRequestArgs::default()
         .max_completion_tokens(128_u32)
         .model(model)
         .messages(ChatCompletionRequestUserMessage::from(user_prompt.clone()))
-        .tools(ChatCompletionTool {
-            function: FunctionObjectArgs::default()
-                .name("Read")
-                .description("Read and return the contents of a file")
-                .parameters(json!({
-                    "type": "object",
-                    "properties": {
-                        "file_path": {
-                            "type": "string",
-                            "description": "The path to the file to read",
-                        }
-                    }
-                }))
-                .strict(true)
-                .build()?,
-        })
+        .tools(tools)
         .build()?;
 
     loop {
@@ -72,12 +101,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let name = tool_call.function.name.clone();
                     eprintln!("Calling {name} function.");
                     let args = tool_call.function.arguments.clone();
-                    let args: Value = serde_json::from_str(&args).unwrap();
-                    let file_path = args["file_path"].as_str().unwrap();
-                    let file_contents = read_file_to_string(file_path)?;
-                    eprintln!("file contents: {file_contents}");
-                    let file_contents = json!(&file_contents);
-                    function_responses.push((tool_call, file_contents));
+                    let args: Value =
+                        serde_json::from_str(&args).expect("Should have some arguments");
+                    eprintln!("{args:?}");
+                    let file_path = args["file_path"]
+                        .as_str()
+                        .expect("Should have a `file_path` argument.");
+                    match name.as_str() {
+                        "Read" => {
+                            let file_contents = read_file_to_string(file_path)?;
+                            eprintln!("file contents: {file_contents}");
+                            let file_contents = json!(&file_contents);
+                            function_responses.push((tool_call, file_contents));
+                        }
+                        "Write" => {
+                            let content = args["content"]
+                                .as_str()
+                                .expect("Should have a `content` argument");
+                            let new_file_contents = write_to_file(file_path, content)?;
+                            let new_file_value = json!(new_file_contents.as_str());
+                            function_responses.push((tool_call, new_file_value));
+                        }
+                        _ => unimplemented!("We only have read and write tools at this stage."),
+                    }
                 }
             }
             append_tool_responses(&mut request, &function_responses)?;
@@ -130,4 +176,13 @@ fn read_file_to_string(path: impl AsRef<Path>) -> Result<String, Box<dyn std::er
     eprintln!("Read file: {}", path.as_ref().display());
     eprintln!("File contents: {file_contents}");
     Ok(file_contents)
+}
+
+fn write_to_file(
+    path: impl AsRef<Path>,
+    contents: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(contents.as_bytes())?;
+    Ok(contents.into())
 }
