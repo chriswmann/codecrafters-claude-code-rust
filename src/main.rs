@@ -1,8 +1,8 @@
 use async_openai::types::chat::{
-    ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessageArgs,
-    ChatCompletionRequestMessage, ChatCompletionRequestToolMessage,
-    ChatCompletionRequestUserMessage, ChatCompletionTool, CreateChatCompletionRequestArgs,
-    FunctionObjectArgs,
+    ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
+    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
+    ChatCompletionRequestToolMessage, ChatCompletionRequestUserMessage, ChatCompletionTool,
+    CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FunctionObjectArgs,
 };
 use async_openai::{Client, config::OpenAIConfig};
 use clap::Parser;
@@ -60,65 +60,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     loop {
-        let response_message = client
-            .chat()
-            .create(request.clone())
-            .await?
-            .choices
-            .first()
-            .ok_or("No choices")?
-            .message
-            .clone();
+        let response = client.chat().create(request.clone()).await?;
+        let response_message = response.choices.first().ok_or("No choices")?;
 
-        if let Some(tool_calls) = response_message.tool_calls {
+        if let Some(ref tool_calls) = response_message.message.tool_calls {
             let mut function_responses = Vec::new();
             for tool_call_enum in tool_calls {
-                // Extract the function tool call from the enum
+                // Extract the function tool call from the enum.
+                // At the moment we only have the Read tool.
                 if let ChatCompletionMessageToolCalls::Function(tool_call) = tool_call_enum {
                     let name = tool_call.function.name.clone();
                     eprintln!("Calling {name} function.");
                     let args = tool_call.function.arguments.clone();
                     let args: Value = serde_json::from_str(&args).unwrap();
                     let file_path = args["file_path"].as_str().unwrap();
-                    let file_contents = read_file_to_string(file_path);
-                    function_responses.push((tool_call.clone(), file_contents));
+                    let file_contents = read_file_to_string(file_path)?;
+                    eprintln!("file contents: {file_contents}");
+                    let file_contents = json!(&file_contents);
+                    function_responses.push((tool_call, file_contents));
                 }
             }
-            // Assemble the messages ready to pass to the request on the next iteration
-            // let mut messages: Vec<ChatCompletionRequestMessage> =
-            //     ChatCompletionRequestUserMessage::from(user_prompt.clone()).into();
-            // Convert ChatCompletionMessageToolCall to ChatCompletionMessageToolCalls enum
-            let tool_calls: Vec<ChatCompletionMessageToolCalls> = function_responses
-                .iter()
-                .map(|(tool_call, _response_content)| {
-                    ChatCompletionMessageToolCalls::from(tool_call.clone())
-                })
-                .collect();
-            let assistant_messages: ChatCompletionRequestMessage =
-                ChatCompletionRequestAssistantMessageArgs::default()
-                    .tool_calls(tool_calls)
-                    .build()?
-                    .into();
-
-            let tool_messages: Vec<ChatCompletionRequestMessage> = function_responses
-                .iter()
-                .map(|(tool_call, response_content)| {
-                    ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
-                        content: response_content.to_string().into(),
-                        tool_call_id: tool_call.id.clone(),
-                    })
-                })
-                .collect();
-
-            request.messages.push(assistant_messages);
-            request.messages.extend(tool_messages);
-        } else {
-            if let Some(message) = response_message.content {
-                println!("{message}");
-            }
+            append_tool_responses(&mut request, &function_responses)?;
+        } else if let Some(message) = &response_message.message.content {
+            println!("{message}");
             break;
         }
     }
+    Ok(())
+}
+
+fn append_tool_responses(
+    request: &mut CreateChatCompletionRequest,
+    function_responses: &[(&ChatCompletionMessageToolCall, Value)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Convert ChatCompletionMessageToolCall to ChatCompletionMessageToolCalls enum
+    let tool_calls: Vec<ChatCompletionMessageToolCalls> = function_responses
+        .iter()
+        .map(|(tool_call, _response_content)| {
+            ChatCompletionMessageToolCalls::from((*tool_call).clone())
+        })
+        .collect();
+    let assistant_messages: ChatCompletionRequestMessage =
+        ChatCompletionRequestAssistantMessageArgs::default()
+            .tool_calls(tool_calls)
+            .build()?
+            .into();
+
+    let tool_messages: Vec<ChatCompletionRequestMessage> = function_responses
+        .iter()
+        .map(|(tool_call, response_content)| {
+            ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
+                content: response_content.to_string().into(),
+                tool_call_id: tool_call.id.clone(),
+            })
+        })
+        .collect();
+
+    request.messages.push(assistant_messages);
+    request.messages.extend(tool_messages);
     Ok(())
 }
 
@@ -126,11 +125,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Will return `Err` if `path` does not exist or the user does not have permissions
 /// to read it.
-pub fn read_file_to_string(path: impl AsRef<Path>) -> Value {
+fn read_file_to_string(path: impl AsRef<Path>) -> Result<String, Box<dyn std::error::Error>> {
     let file_contents = std::fs::read_to_string(&path).unwrap_or_default();
     eprintln!("Read file: {}", path.as_ref().display());
-    eprintln!("File contents: {}", file_contents);
-    json!({
-        "content": file_contents
-    })
+    eprintln!("File contents: {file_contents}");
+    Ok(file_contents)
 }
