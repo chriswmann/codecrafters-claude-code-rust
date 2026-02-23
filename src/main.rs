@@ -65,10 +65,12 @@ async fn main() -> Result<()> {
     let mut request = CreateChatCompletionRequestArgs::default()
         .max_completion_tokens(128_u32)
         .model(model)
-        .messages(ChatCompletionRequestUserMessage::from(user_prompt.clone()))
+        .messages(ChatCompletionRequestUserMessage::from(user_prompt))
         .tools(tools)
         .build()?;
 
+    // Note: in a real agent, the errors would be handled and returned to the LLM to retry,
+    // rather than returning `Err` from `main`.
     loop {
         let response = client.chat().create(request.clone()).await?;
         let response_message = response.choices.first().context("No choices")?;
@@ -116,7 +118,7 @@ fn append_tool_responses(
             ChatCompletionMessageToolCalls::from((*tool_call).clone())
         })
         .collect();
-    let assistant_messages: ChatCompletionRequestMessage =
+    let assistant_message: ChatCompletionRequestMessage =
         ChatCompletionRequestAssistantMessageArgs::default()
             .tool_calls(tool_calls)
             .build()?
@@ -132,7 +134,7 @@ fn append_tool_responses(
         })
         .collect();
 
-    request.messages.push(assistant_messages);
+    request.messages.push(assistant_message);
     request.messages.extend(tool_messages);
     Ok(())
 }
@@ -142,9 +144,9 @@ fn call_read_tool<'tool_call>(
     args: &Value,
     function_responses: &mut Vec<(&'tool_call ChatCompletionMessageToolCall, Value)>,
 ) -> Result<()> {
-    let file_path = args["file_path"].as_str().context(format!(
-        "Should have a `file_path` argument. Args were: {args:#?}"
-    ))?;
+    let file_path = args["file_path"]
+        .as_str()
+        .context("Should have a `file_path` argument.")?;
     let file_contents = read_file_to_string(file_path)?;
     eprintln!("file contents: {file_contents}");
     let file_contents = json!(&file_contents);
@@ -160,9 +162,9 @@ fn call_write_tool<'tool_call>(
     let file_path = args["file_path"]
         .as_str()
         .context("Should have a `file_path` argument.")?;
-    let content = args["content"].as_str().context(format!(
-        "Should have a `content` argument. Args were: {args:#?}"
-    ))?;
+    let content = args["content"]
+        .as_str()
+        .context("Should have a `content` argument.")?;
     write_to_file(file_path, content)?;
     let new_file_value = json!(content);
     function_responses.push((tool_call, new_file_value));
@@ -174,9 +176,9 @@ fn call_bash_tool<'tool_call>(
     args: &Value,
     function_responses: &mut Vec<(&'tool_call ChatCompletionMessageToolCall, Value)>,
 ) -> Result<()> {
-    let command = args["command"].as_str().context(format!(
-        "Should have a `command` argument. Args were: {args:#?}"
-    ))?;
+    let command = args["command"]
+        .as_str()
+        .context("Should have a `command` argument.")?;
     let output = execute_bash_command(command)?;
     function_responses.push((tool_call, json!(output)));
     Ok(())
@@ -199,9 +201,9 @@ fn execute_bash_command(command: &str) -> Result<String> {
         .arg("-c")
         .arg(command)
         .output()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Ok(format!("{stdout} {stderr}"))
+    let stdout = String::from_utf8_lossy(&output.stdout.trim_ascii());
+    let stderr = String::from_utf8_lossy(&output.stderr.trim_ascii());
+    Ok(format!("stdout:{stdout}\nstderr:{stderr}"))
 }
 
 fn tool_definition_factory(
